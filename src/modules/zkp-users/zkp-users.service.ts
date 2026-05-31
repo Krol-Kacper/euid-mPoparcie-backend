@@ -26,7 +26,7 @@ export const generateLinkService = async () => {
           meta: {
             vct_values: ["urn:eudi:pid:1"],
           },
-          claims: [{ path: ["family_name"] }, { path: ["given_name"] }],
+          claims: [{ path: ["family_name"] }, { path: ["given_name"] }, { path: ["personal_administrative_number"] }],
         },
       ],
     },
@@ -49,23 +49,18 @@ export const generateLinkService = async () => {
   };
 };
 
-/**
- * STRZELA TYLKO RAZ. Jeśli użytkownik zatwierdził -> zwraca Token.
- * Jeśli nadal czeka -> zwraca null. Zapobiega to blokowaniu Node.js.
- */
+
 export const zkprequestuserHashService = async (
   transactionId: string,
 ): Promise<string> => {
-  const timeoutMs = 5 * 60 * 1000; // Maksymalny czas oczekiwania: 5 minut
-  const intervalMs = 2000; // Odstęp między zapytaniami: 2 sekundy
+  const timeoutMs = 5 * 60 * 1000;
+  const intervalMs = 3000;
   const started = Date.now();
   const baseUrl = getVerifierBaseUrl();
 
-  let hasBeenSuccessful = false;
 
   while (Date.now() - started < timeoutMs) {
     try {
-      // Strzał do API sandboxa
       const resp = await axios.get(
         `${baseUrl}/ui/presentations/${transactionId}`,
         {
@@ -73,77 +68,44 @@ export const zkprequestuserHashService = async (
         },
       );
 
-      // Jeśli otrzymamy status 200 i transakcja została zakończona sukcesem
-      if (
-        resp.status === 200 &&
-        resp.data
-      ) {
+      const sdJwt: string = resp.data.vp_token.query_1[0];
 
-        hasBeenSuccessful = true;
-        const payload = resp.data;
+      const utilitiesResp = await axios.post(
+        `${baseUrl}/utilities/process/sdJwtVc`,
+        `sd_jwt_vc=${encodeURIComponent(sdJwt)}`,
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+      );
 
-        // Weryfikujemy dane i odczytujemy je do zrobienia  userHasha
+      const claims = utilitiesResp.data;
+      const familyName = claims.family_name;
+      const givenName = claims.given_name;
+      const adminNumber = claims.personal_administrative_number;
 
-        const rawVpToken = payload?.get_wallet_response?.vp_token;
-        const utilitiesBody = {
-          jwt: rawVpToken 
-        };
-        const utilitiesResp = await axios.post(
-          `${baseUrl}/utilities/process/sdJwtVc`,
-          utilitiesBody,
-          {
-            headers: { "Content-Type": "application/json" },
-          },
-        );
+      const userHash = crypto
+        .createHash("sha256")
+        .update(`${familyName}${givenName}${adminNumber}`)
+        .digest("hex");
 
-        if (utilitiesResp?.data?.valid){
-          console.log("VC jest ważne i przetworzone poprawnie przez Verifier'a");
-
-          const claims = utilitiesResp?.data?.claims;
-          console.log("Odczytane claims z VC:", claims);
-
-          const familyName = claims?.family_name;
-          const givenName = claims?.given_name;
-          const pid = claims?.personal_administrative_number;
-
-          // Generujemy unikalny userHash dla Twojego drzewa Merkle'a
-          const userHash = crypto
-            .createHash("sha256")
-            .update(String(familyName) + String(givenName) + String(pid))
-            .digest("hex");
-
-          // Budujemy token dla rejestracji/3
-          const token = generateToken({
-            username: String("registrar"),
-            userId: userHash,
-            role: "zkp-user",
-          });
-
-          return token; // Przerywamy pętlę i zwracamy gotowy token!
-        }
-
-      }
+      return generateToken({
+        username: "registrar",
+        userId: userHash,
+        role: "zkp-user",
+      });
     } catch (err: any) {
       const status = err?.response?.status;
 
-      // Kod 405 (Method Not Allowed) lub 404 oznacza w unijnym API, że transakcja istnieje,
-      // ale użytkownik jeszcze nie kliknął "Udostępnij" w telefonie.
       if (status === 400) {
-        // Logika "Still Pending" — ignorujemy błąd i pozwalamy pętli kręcić się dalej
         console.log(
           `[Polling] Transakcja ${transactionId} wciąż oczekuje (Status HTTP: ${status})...`,
         );
       } else {
-        // Jeśli wystąpił inny błąd (np. brak sieci, błąd 500 w Brukseli), rzucamy wyjątek wyżej
         throw err;
       }
     }
 
-    // Odczekaj 2 sekundy przed kolejną próbą
     await sleep(intervalMs);
   }
 
-  // Jeśli pętla wyjdzie poza czas 5 minut
   throw new Error(
     "Timeout: Użytkownik nie potwierdził weryfikacji w EUDI Wallet w wymaganym czasie.",
   );
