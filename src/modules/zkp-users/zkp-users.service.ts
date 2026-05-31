@@ -61,9 +61,11 @@ export const zkprequestuserHashService = async (
   const started = Date.now();
   const baseUrl = getVerifierBaseUrl();
 
+  let hasBeenSuccessful = false;
+
   while (Date.now() - started < timeoutMs) {
     try {
-      // Strzał do API v2 sandboxa
+      // Strzał do API sandboxa
       const resp = await axios.get(
         `${baseUrl}/ui/presentations/${transactionId}`,
         {
@@ -76,35 +78,50 @@ export const zkprequestuserHashService = async (
         resp.status === 200 &&
         resp.data
       ) {
+
+        hasBeenSuccessful = true;
         const payload = resp.data;
 
-        // Wyciągamy dane z formatu dc+sd-jwt (zgodnie z nowym body z Brukseli)
-        const walletData =
-          payload?.get_wallet_response?.verifiable_presentations?.[0]?.claims;
+        // Weryfikujemy dane i odczytujemy je do zrobienia  userHasha
 
-        // Szukamy identyfikatora (w tym profilu v2 najpewniejsze jest nazwisko lub imię)
-        const personalId = walletData?.family_name || walletData?.given_name;
+        const rawVpToken = payload?.get_wallet_response?.vp_token;
+        const utilitiesBody = {
+          jwt: rawVpToken 
+        };
+        const utilitiesResp = await axios.post(
+          `${baseUrl}/utilities/process/sdJwtVc`,
+          utilitiesBody,
+          {
+            headers: { "Content-Type": "application/json" },
+          },
+        );
 
-        if (!personalId) {
-          throw new Error(
-            "Bruksela nie zwróciła oczekiwanych pól (family_name/given_name)",
-          );
+        if (utilitiesResp?.data?.valid){
+          console.log("VC jest ważne i przetworzone poprawnie przez Verifier'a");
+
+          const claims = utilitiesResp?.data?.claims;
+          console.log("Odczytane claims z VC:", claims);
+
+          const familyName = claims?.family_name;
+          const givenName = claims?.given_name;
+          const pid = claims?.personal_administrative_number;
+
+          // Generujemy unikalny userHash dla Twojego drzewa Merkle'a
+          const userHash = crypto
+            .createHash("sha256")
+            .update(String(familyName) + String(givenName) + String(pid))
+            .digest("hex");
+
+          // Budujemy token dla rejestracji/3
+          const token = generateToken({
+            username: String("registrar"),
+            userId: userHash,
+            role: "zkp-user",
+          });
+
+          return token; // Przerywamy pętlę i zwracamy gotowy token!
         }
 
-        // Generujemy unikalny userHash dla Twojego drzewa Merkle'a
-        const userHash = crypto
-          .createHash("sha256")
-          .update(String(personalId))
-          .digest("hex");
-
-        // Budujemy token dla rejestracji/3
-        const token = generateToken({
-          username: String(personalId),
-          userId: userHash,
-          role: "zkp-user",
-        });
-
-        return token; // Przerywamy pętlę i zwracamy gotowy token!
       }
     } catch (err: any) {
       const status = err?.response?.status;
