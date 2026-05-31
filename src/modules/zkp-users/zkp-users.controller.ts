@@ -13,10 +13,9 @@ export const zkprequestuserHash = async (
   res: Response,
   next: NextFunction,
 ) => {
-  
   try {
     const transaction_id = req.params.transaction_id;
-    
+
     // UWAGA: Ta linia zatrzyma wykonanie kontrolera (zawiesi żądanie HTTP z frontendu)
     // na tak długo, aż użytkownik kliknie przycisk w telefonie lub minie 5 minut.
     const token = await zkprequestuserHashService(transaction_id);
@@ -29,9 +28,10 @@ export const zkprequestuserHash = async (
       maxAge: 5 * 60 * 1000, // 5 minut
     });
 
-    return res
-      .status(201)
-      .json({ status: "success", message: "Rejestracja/2 udana, token wygenerowany" });
+    return res.status(201).json({
+      status: "success",
+      message: "Rejestracja/2 udana, token wygenerowany",
+    });
   } catch (error) {
     next(error);
   }
@@ -70,8 +70,7 @@ export const generateLink = async (
       status: "success",
       message: "Rejestracja/1 udana",
       transactionId: linkData.transactionId,
-      qr: linkData.qr
-      // raw: linkData,
+      qr: linkData.qr,
     });
   } catch (error) {
     next(error);
@@ -85,9 +84,9 @@ export const webhookReceiver = async (
 ) => {
   try {
     // Webhook-based flow is deprecated for eudi-verifier; polling is used instead.
-    return res
-      .status(501)
-      .json({ error: "Webhook not supported. Use polling to check transaction status." });
+    return res.status(501).json({
+      error: "Webhook not supported. Use polling to check transaction status.",
+    });
   } catch (error) {
     next(error);
   }
