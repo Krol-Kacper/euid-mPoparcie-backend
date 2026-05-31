@@ -13,31 +13,25 @@ export const zkprequestuserHash = async (
   res: Response,
   next: NextFunction,
 ) => {
+  
   try {
     const transaction_id = req.params.transaction_id;
     
-    // Zapytanie wykona się błyskawicznie (ułamek sekundy)
+    // UWAGA: Ta linia zatrzyma wykonanie kontrolera (zawiesi żądanie HTTP z frontendu)
+    // na tak długo, aż użytkownik kliknie przycisk w telefonie lub minie 5 minut.
     const token = await zkprequestuserHashService(transaction_id);
-    
-    if (token) {
-      res.cookie("token", token, {
-        httpOnly: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: 5 * 60 * 1000, // 5 minut
-      });
 
-      return res
-        .status(201)
-        .json({ status: "success", message: "Rejestracja/2 udana, użytkownik zweryfikowany" });
-    }
-    
-    // Jeśli serwis zwrócił null, zwracamy 202 Accepted. 
-    // Frontend widząc to wie, że ma ponowić zapytanie za 2 sekundy.
+    // Kiedy kod tu dotrze, oznacza to, że mamy już gotowy token
+    res.cookie("token", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 5 * 60 * 1000, // 5 minut
+    });
+
     return res
-      .status(202)
-      .json({ status: "pending", message: "Oczekiwanie na zatwierdzenie w portfelu użytkownika..." });
-      
+      .status(201)
+      .json({ status: "success", message: "Rejestracja/2 udana, token wygenerowany" });
   } catch (error) {
     next(error);
   }
@@ -75,7 +69,9 @@ export const generateLink = async (
     return res.status(200).json({
       status: "success",
       message: "Rejestracja/1 udana",
-      data: linkData,
+      transactionId: linkData.transactionId,
+      qr: linkData.qr
+      // raw: linkData,
     });
   } catch (error) {
     next(error);

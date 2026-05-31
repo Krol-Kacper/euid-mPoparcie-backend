@@ -11,7 +11,7 @@ import { generateLink } from "./zkp-users.controller.js";
 const router: Router = express.Router();
 
 // init presentation (creates transaction + QR)
-router.get("/register/1", generateLink);
+router.post("/register/1", generateLink);
 // poll presentation status by transaction id
 router.get("/register/2/:transaction_id", zkprequestuserHash);
 router.post(

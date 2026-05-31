@@ -10,6 +10,8 @@ const getVerifierBaseUrl = () => {
   return verifierHost
 };
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export const generateLinkService = async () => {
 
   const body = {
@@ -35,16 +37,17 @@ export const generateLinkService = async () => {
   };
 
   const baseUrl = getVerifierBaseUrl();
-  const response = await axios.post(`${baseUrl}/ui/presentations/v2`, body, {
+  const response = await axios.post(`${baseUrl}/ui/presentations`, body, {
     headers: { "Content-Type": "application/json" },
   });
   
   const data = response.data || {};
-  console.log(data);
+  console.log(data.transaction_id);
+  console.log(data.request_uri);
   return { 
     transactionId: data.transaction_id, 
-    qr: data.request_uri, 
-    raw: data 
+    qr: data.request_uri,
+    // raw: data
   };
 };
 
@@ -52,56 +55,66 @@ export const generateLinkService = async () => {
  * STRZELA TYLKO RAZ. Jeśli użytkownik zatwierdził -> zwraca Token. 
  * Jeśli nadal czeka -> zwraca null. Zapobiega to blokowaniu Node.js.
  */
-export const zkprequestuserHashService = async (transactionId: string): Promise<string | null> => {
-  try {
-    const baseUrl = getVerifierBaseUrl();
-    const resp = await axios.get(`${baseUrl}/ui/presentations/v2/${transactionId}`);
-    
-    // Sprawdzamy czy kontener odpowiedział statusem 200 i stan transakcji to "Submitted"
-    if (resp.status === 200 && resp.data && resp.data.status === "Submitted") {
-      const payload = resp.data;
+export const zkprequestuserHashService = async (transactionId: string): Promise<string> => {
+  const timeoutMs = 5 * 60 * 1000; // Maksymalny czas oczekiwania: 5 minut
+  const intervalMs = 2000;         // Odstęp między zapytaniami: 2 sekundy
+  const started = Date.now();
+  const baseUrl = getVerifierBaseUrl();
 
-      // NAPRAWA 2: Dopasowanie wyciągania danych do struktury v2 (DCQL)
-      // W API v2 dane z portfela lądują w obiekcie wallet_response
-      const walletResponse = payload?.get_wallet_response || payload?.wallet_response;
-      
-      // Wyciągamy claims w zależności od tego, czy telefon przysłał mdoc czy sd-jwt
-      const sdJwtClaims = walletResponse?.verifiable_presentations?.[0]?.claims;
-      
-      const walletData = sdJwtClaims;
-      
-      // Szukamy unikalnego identyfikatora (PESEL / PAN)
-      const personalId = walletData?.personal_administrative_number 
-                      || walletData?.personal_number 
-                      || walletData?.family_name; // fallback na nazwisko jeśli brak peselu w testach
-
-      if (!personalId) {
-        throw new Error("Nie udało się wyciągnąć unikalnego numeru identyfikacyjnego z portfela");
-      }
-
-      // Generujemy bezpieczny hash dla drzewa Merkle'a
-      const userHash = crypto.createHash("sha256").update(String(personalId)).digest("hex");
-
-      const token = generateToken({
-        username: String(personalId),
-        userId: userHash,
-        role: "zkp-user",
+  while (Date.now() - started < timeoutMs) {
+    try {
+      // Strzał do API v2 sandboxa
+      const resp = await axios.get(`${baseUrl}/ui/presentations/${transactionId}`, {
+        headers: { "accept": "application/json" },
       });
-    
-      return token;
-    } 
-    
-    return null; // Status to np. "Requested" - użytkownik jeszcze nie kliknął w telefonie
-    
-  } catch (err: any) {
-    const status = err?.response?.status;
-    // W API v2 jeśli transakcja nie jest gotowa, serwer może zwrócić 200 ze statusem "Requested" 
-    // lub rzucić błąd 404/405 w zależności od dokładnej podwersji kontenera.
-    if (status === 405 || status === 202 || status === 404) {
-      return null;
+      
+      // Jeśli otrzymamy status 200 i transakcja została zakończona sukcesem
+      if (resp.status === 200 && resp.data && resp.data.status === "Submitted") {
+        const payload = resp.data;
+
+        // Wyciągamy dane z formatu dc+sd-jwt (zgodnie z nowym body z Brukseli)
+        const walletData = payload?.get_wallet_response?.verifiable_presentations?.[0]?.claims;
+        
+        // Szukamy identyfikatora (w tym profilu v2 najpewniejsze jest nazwisko lub imię)
+        const personalId = walletData?.family_name || walletData?.given_name;
+
+        if (!personalId) {
+          throw new Error("Bruksela nie zwróciła oczekiwanych pól (family_name/given_name)");
+        }
+
+        // Generujemy unikalny userHash dla Twojego drzewa Merkle'a
+        const userHash = crypto.createHash("sha256").update(String(personalId)).digest("hex");
+
+        // Budujemy token dla rejestracji/3
+        const token = generateToken({
+          username: String(personalId),
+          userId: userHash,
+          role: "zkp-user",
+        });
+      
+        return token; // Przerywamy pętlę i zwracamy gotowy token!
+      }
+      
+    } catch (err: any) {
+      const status = err?.response?.status;
+      
+      // Kod 405 (Method Not Allowed) lub 404 oznacza w unijnym API, że transakcja istnieje,
+      // ale użytkownik jeszcze nie kliknął "Udostępnij" w telefonie.
+      if (status === 405 || status === 202 || status === 404 || status === 408) {
+        // Logika "Still Pending" — ignorujemy błąd i pozwalamy pętli kręcić się dalej
+        console.log(`[Polling] Transakcja ${transactionId} wciąż oczekuje (Status HTTP: ${status})...`);
+      } else {
+        // Jeśli wystąpił inny błąd (np. brak sieci, błąd 500 w Brukseli), rzucamy wyjątek wyżej
+        throw err;
+      }
     }
-    throw err;
+
+    // Odczekaj 2 sekundy przed kolejną próbą
+    await sleep(intervalMs);
   }
+
+  // Jeśli pętla wyjdzie poza czas 5 minut
+  throw new Error("Timeout: Użytkownik nie potwierdził weryfikacji w EUDI Wallet w wymaganym czasie.");
 };
 
 export const zkpregisterService = async (userHash: string, commitment: string) => {
