@@ -1,94 +1,110 @@
 import axios from "axios";
 import { ZkpUserModel } from "./zkp-users.model.js";
 import { generateToken } from "../../shared/utils/jwt.util.js";
-
 import { ZkpMetadataModel, ZkpCommitmentModel } from "./merkle-tree.model.js";
-import {
-  addMemberToTree,
-  buildSemaphoreGroup,
-} from "./merkle-tree-functions.js";
+import { addMemberToTree, buildSemaphoreGroup } from "./merkle-tree-functions.js";
+import crypto from "crypto";
 
-import {
-  type IdenttTokenResponseDTO,
-  type IdenttLinkResponseDTO,
-} from "./zkp-users.schema.js";
-import EventEmitter from "events";
+const getVerifierBaseUrl = () => {
+  const verifierHost = process.env.VERIFIER_URL ?? "https://dev.verifier-backend.eudiw.dev";
+  return verifierHost
+};
 
 export const generateLinkService = async () => {
-  const token = await getIdenttToken();
-  const reponse = await axios.post<IdenttLinkResponseDTO>(
-    "https://i2c.ivs-stg02.identt.pl/api/v2/verify/self/init/",
-    {},
-    {
-      headers: { Authorization: `Bearer ${token}` },
+
+  const body = {
+    dcql_query: {
+      credentials: [
+        {
+          id: "query_1",
+          format: "dc+sd-jwt",
+          meta: {
+            vct_values: ["urn:eudi:pid:1"]
+          },
+          claims: [
+            { path: ["family_name"] },
+            { path: ["given_name"] }
+          ]
+        }
+      ]
     },
-  );
-  //generate a link https://sv-lite.ivs-stg02.identt.pl/self-verify/?document_id=<document_id>&session_id=<session_id>
-  const { session_id, document_id } = reponse.data;
-  const link = `https://sv-lite.ivs-stg02.identt.pl/self-verify/?document_id=${document_id}&session_id=${session_id}`;
-  return link;
+    nonce: crypto.randomUUID(), 
+    request_uri_method: "post_get",
+    profile: "openid4vp",
+    authorization_request_uri: "openid4vp://"
+  };
+
+  const baseUrl = getVerifierBaseUrl();
+  const response = await axios.post(`${baseUrl}/ui/presentations/v2`, body, {
+    headers: { "Content-Type": "application/json" },
+  });
+  
+  const data = response.data || {};
+  console.log(data);
+  return { 
+    transactionId: data.transaction_id, 
+    qr: data.request_uri, 
+    raw: data 
+  };
 };
 
-let cachedToken: string | null = null;
-let tokenExpiration: number = 0;
-const getIdenttToken = async () => {
-  if (cachedToken && tokenExpiration && Date.now() < tokenExpiration) {
-    return cachedToken;
-  }
-  const formData = new URLSearchParams();
-  formData.append("client_id", process.env.IDENTT_CLIENT_ID as string);
-  formData.append("client_secret", process.env.IDENTT_CLIENT_SECRET as string);
-  formData.append("username", process.env.IDENTT_USERNAME as string);
-  formData.append("password", process.env.IDENTT_PASSWORD as string);
-  formData.append("grant_type", "password");
-  const response = await axios.post<IdenttTokenResponseDTO>(
-    "https://i2c.ivs-stg02.identt.pl/auth/token/",
-    formData,
-    {
-      headers: {
-        Authorization: `Basic ${process.env.IDENTT_BASIC_AUTH_TOKEN as string}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-    },
-  );
-  const access_token = response.data.access_token;
-  const expires_in = response.data.expires_in;
+/**
+ * STRZELA TYLKO RAZ. Jeśli użytkownik zatwierdził -> zwraca Token. 
+ * Jeśli nadal czeka -> zwraca null. Zapobiega to blokowaniu Node.js.
+ */
+export const zkprequestuserHashService = async (transactionId: string): Promise<string | null> => {
+  try {
+    const baseUrl = getVerifierBaseUrl();
+    const resp = await axios.get(`${baseUrl}/ui/presentations/v2/${transactionId}`);
+    
+    // Sprawdzamy czy kontener odpowiedział statusem 200 i stan transakcji to "Submitted"
+    if (resp.status === 200 && resp.data && resp.data.status === "Submitted") {
+      const payload = resp.data;
 
-  cachedToken = access_token;
-  tokenExpiration = Date.now() + expires_in * 1000 - 60000; // -1 minute
-  return access_token;
-};
+      // NAPRAWA 2: Dopasowanie wyciągania danych do struktury v2 (DCQL)
+      // W API v2 dane z portfela lądują w obiekcie wallet_response
+      const walletResponse = payload?.get_wallet_response || payload?.wallet_response;
+      
+      // Wyciągamy claims w zależności od tego, czy telefon przysłał mdoc czy sd-jwt
+      const sdJwtClaims = walletResponse?.verifiable_presentations?.[0]?.claims;
+      
+      const walletData = sdJwtClaims;
+      
+      // Szukamy unikalnego identyfikatora (PESEL / PAN)
+      const personalId = walletData?.personal_administrative_number 
+                      || walletData?.personal_number 
+                      || walletData?.family_name; // fallback na nazwisko jeśli brak peselu w testach
 
-export const webhookEmitter = new EventEmitter();
+      if (!personalId) {
+        throw new Error("Nie udało się wyciągnąć unikalnego numeru identyfikacyjnego z portfela");
+      }
 
-export const zkprequestuserHashService = async (document_id: string) => {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => {
-        reject(new Error("Timeout oczekiwania na webhook z Identt"));
-      },
-      5 * 60 * 1000,
-    ); //5 minutes
-
-    webhookEmitter.once(document_id, (data: { userHash: string }) => {
-      const { userHash } = data;
+      // Generujemy bezpieczny hash dla drzewa Merkle'a
+      const userHash = crypto.createHash("sha256").update(String(personalId)).digest("hex");
 
       const token = generateToken({
-        username: "none",
+        username: String(personalId),
         userId: userHash,
         role: "zkp-user",
       });
-      clearTimeout(timeout);
-      resolve(token);
-    });
-  });
+    
+      return token;
+    } 
+    
+    return null; // Status to np. "Requested" - użytkownik jeszcze nie kliknął w telefonie
+    
+  } catch (err: any) {
+    const status = err?.response?.status;
+    // W API v2 jeśli transakcja nie jest gotowa, serwer może zwrócić 200 ze statusem "Requested" 
+    // lub rzucić błąd 404/405 w zależności od dokładnej podwersji kontenera.
+    if (status === 405 || status === 202 || status === 404) {
+      return null;
+    }
+    throw err;
+  }
 };
 
-export const zkpregisterService = async (
-  userHash: string,
-  commitment: string,
-) => {
-  // zapisanie userhash w bazie danych
+export const zkpregisterService = async (userHash: string, commitment: string) => {
   const existing = await ZkpUserModel.findOne({ userHash });
   if (existing) throw new Error("Taka osoba już jest zarejestrowana");
 
@@ -96,25 +112,20 @@ export const zkpregisterService = async (
   if (!created) throw new Error("Nie udało się zarejestrować użytkownika");
 
   try {
-    // zapisanie do drzewa Merkle'a (domyślny groupId = "1")
     await addMemberToTree(commitment);
-    // odbuduj grupę i odczytaj aktualny root
     const group = await buildSemaphoreGroup();
     const root = (group && (group as any).root) ?? null;
-    console.log("Nowy korzeń:", root);
-
-    // jeśli doszliśmy tu bez błędów — zwróć sukces
+    console.log("Nowy korzeń drzewa Merkle'a:", root);
     return true;
   } catch (error) {
     console.error("Błąd podczas rejestracji ZKP:", error);
-    // rollback: usuń utworzonego użytkownika(userhash), jeśli istnieje
     try {
       if (created && created._id) {
         await ZkpUserModel.deleteOne({ _id: created._id }).exec();
-        console.log("Rollback: usunięto utworzonego użytkownika");
+        console.log("Rollback udany: usunięto użytkownika z bazy");
       }
     } catch (rollbackErr) {
-      console.error("Rollback failed:", rollbackErr);
+      console.error("Rollback nie powiódł się:", rollbackErr);
     }
     throw error;
   }
@@ -123,12 +134,7 @@ export const zkpregisterService = async (
 export const zkpTreeDumpService = async (groupId: string = "1") => {
   try {
     const root = await ZkpMetadataModel.find({ groupId }).sort("index").exec();
-
-    // Pobierz surowe wpisy z bazy tej samej grupy (posortowane po indeksie)
-    const members = await ZkpCommitmentModel.find({ groupId })
-      .sort("index")
-      .exec();
-
+    const members = await ZkpCommitmentModel.find({ groupId }).sort("index").exec();
     return { root, members };
   } catch (error) {
     console.error("Błąd podczas dumpowania drzewa:", error);

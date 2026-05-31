@@ -5,32 +5,39 @@ import {
 } from "./zkp-users.service.js";
 import type { RegisterDTO } from "./zkp-users.schema.js";
 import { zkpTreeDumpService } from "./zkp-users.service.js";
-import { webhookEmitter } from "./zkp-users.service.js";
 import crypto from "crypto";
 import { generateLinkService } from "./zkp-users.service.js";
 
 export const zkprequestuserHash = async (
-  req: Request<{ document_id: string }, any, any>,
+  req: Request<{ transaction_id: string }, any, any>,
   res: Response,
   next: NextFunction,
 ) => {
   try {
-    // w tokenie jest userHash
-    const document_id = req.params.document_id;
-    const token = await zkprequestuserHashService(document_id);
+    const transaction_id = req.params.transaction_id;
+    
+    // Zapytanie wykona się błyskawicznie (ułamek sekundy)
+    const token = await zkprequestuserHashService(transaction_id);
+    
     if (token) {
       res.cookie("token", token, {
         httpOnly: true,
-        // secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
         path: "/",
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        maxAge: 5 * 60 * 1000, // 5 minut
       });
-    }
 
+      return res
+        .status(201)
+        .json({ status: "success", message: "Rejestracja/2 udana, użytkownik zweryfikowany" });
+    }
+    
+    // Jeśli serwis zwrócił null, zwracamy 202 Accepted. 
+    // Frontend widząc to wie, że ma ponowić zapytanie za 2 sekundy.
     return res
-      .status(201)
-      .json({ status: "success", message: "Rejestracja/2 udana" });
+      .status(202)
+      .json({ status: "pending", message: "Oczekiwanie na zatwierdzenie w portfelu użytkownika..." });
+      
   } catch (error) {
     next(error);
   }
@@ -81,20 +88,10 @@ export const webhookReceiver = async (
   next: NextFunction,
 ) => {
   try {
-    const { document_id, valid } = req.body;
-    const userHash = crypto
-      .createHash("sha256")
-      .update(document_id)
-      .digest("hex");
-    console.log(req.body);
-    if (valid === true) {
-      webhookEmitter.emit(document_id, { userHash }); //should be changed to real userhash later on
-      return res.status(200).json({ error: "Otrzymano webhook" });
-    } else {
-      return res
-        .status(400)
-        .json({ error: "Nastąpił błąd podczas weryfikacji tożsamości." });
-    }
+    // Webhook-based flow is deprecated for eudi-verifier; polling is used instead.
+    return res
+      .status(501)
+      .json({ error: "Webhook not supported. Use polling to check transaction status." });
   } catch (error) {
     next(error);
   }
